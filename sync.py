@@ -35,11 +35,17 @@ SHEET_NAME = os.environ.get("SHEET_NAME", "Transactions")
 SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "90"))
 SPLIT_BY_ACCOUNT = os.environ.get("SPLIT_BY_ACCOUNT", "false").strip().lower() in ("1", "true", "yes")
+ACCOUNT_SCOPE = os.environ.get("ACCOUNT_SCOPE", "all").strip().lower()
 
 UP_BASE = "https://api.up.com.au/api/v1"
 COLUMNS = ["id", "date", "description", "amount", "status", "account", "category", "tags"]
 
 REQUIRED_ENV = {"UP_TOKEN": UP_TOKEN, "SHEET_ID": SHEET_ID}
+
+VALID_SCOPES = ("personal", "joint", "all")
+# personal = "Up" + "Up Savers" (individually-owned accounts)
+# joint    = "2Up" + "2Up Savers" (jointly-owned accounts)
+SCOPE_TO_OWNERSHIP = {"personal": "INDIVIDUAL", "joint": "JOINT"}
 
 
 def check_config():
@@ -48,6 +54,8 @@ def check_config():
         sys.exit(f"Missing required environment variable(s): {', '.join(missing)}")
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
         sys.exit(f"Google service account file not found: {SERVICE_ACCOUNT_FILE}")
+    if ACCOUNT_SCOPE not in VALID_SCOPES:
+        sys.exit(f"ACCOUNT_SCOPE must be one of {VALID_SCOPES}, got {ACCOUNT_SCOPE!r}")
 
 
 # --- Up API ------------------------------------------------------------------
@@ -69,20 +77,38 @@ def fetch_transactions(since_iso):
     return transactions
 
 
-def fetch_account_names():
-    """Return {account_id: displayName} for all of the user's Up accounts."""
+def fetch_accounts():
+    """Return {account_id: {"displayName": ..., "ownershipType": ..., "accountType": ...}}
+    for all of the user's Up accounts."""
     headers = {"Authorization": f"Bearer {UP_TOKEN}"}
     url = f"{UP_BASE}/accounts"
 
-    names = {}
+    accounts = {}
     while url:
         resp = requests.get(url, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
         for acc in payload["data"]:
-            names[acc["id"]] = acc["attributes"].get("displayName", acc["id"])
+            attrs = acc["attributes"]
+            accounts[acc["id"]] = {
+                "displayName": attrs.get("displayName", acc["id"]),
+                "ownershipType": attrs.get("ownershipType"),
+                "accountType": attrs.get("accountType"),
+            }
         url = payload.get("links", {}).get("next")
-    return names
+    return accounts
+
+
+def allowed_account_ids(accounts, scope):
+    """Which account IDs are in scope for 'personal' / 'joint' / 'all'."""
+    if scope == "all":
+        return set(accounts.keys())
+    wanted_ownership = SCOPE_TO_OWNERSHIP[scope]
+    return {
+        account_id
+        for account_id, attrs in accounts.items()
+        if attrs["ownershipType"] == wanted_ownership
+    }
 
 
 def transaction_to_row(tx):
@@ -212,6 +238,11 @@ def main():
     rows = [transaction_to_row(tx) for tx in transactions]
     print(f"Fetched {len(rows)} transactions.")
 
+    accounts = fetch_accounts()
+    in_scope_ids = allowed_account_ids(accounts, ACCOUNT_SCOPE)
+    rows = [row for row in rows if row["account"] in in_scope_ids]
+    print(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}).")
+
     creds = Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
@@ -220,7 +251,7 @@ def main():
     sh = gc.open_by_key(SHEET_ID)
 
     if SPLIT_BY_ACCOUNT:
-        account_names = fetch_account_names()
+        account_names = {acc_id: attrs["displayName"] for acc_id, attrs in accounts.items()}
         grouped = group_rows_by_account(rows)
 
         total_added = total_updated = 0

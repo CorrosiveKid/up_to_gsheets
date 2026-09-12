@@ -86,5 +86,16 @@ sheet keeps growing without every run getting slower.
   logic works the same way per tab as it does for the single combined
   sheet. If an account's name contains characters Google Sheets doesn't
   allow in tab titles, those are stripped automatically.
+- **Which accounts get synced at all** is controlled by `ACCOUNT_SCOPE`:
+  - `personal` — only your individually-owned accounts ("Up" and any
+    "Up Savers").
+  - `joint` — only jointly-owned accounts ("2Up" and any "2Up Savers").
+  - `all` (default) — everything.
+  This filter is applied before `SPLIT_BY_ACCOUNT`, so the two combine
+  naturally — e.g. `ACCOUNT_SCOPE=joint` with `SPLIT_BY_ACCOUNT=true`
+  gives you one tab per joint account and ignores your personal ones
+  entirely. If you have an Up Home loan account, it's classified by
+  ownership like any other account, so it'll be included or excluded
+  the same way as your other personal/joint accounts.
 - The script never deletes rows, so it's safe to re-run after errors —
   worst case it does a bit of redundant comparison work, never data loss.
