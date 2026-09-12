@@ -38,7 +38,13 @@ SPLIT_BY_ACCOUNT = os.environ.get("SPLIT_BY_ACCOUNT", "false").strip().lower() i
 ACCOUNT_SCOPE = os.environ.get("ACCOUNT_SCOPE", "all").strip().lower()
 
 UP_BASE = "https://api.up.com.au/api/v1"
-COLUMNS = ["id", "date", "description", "amount", "status", "account", "category", "tags"]
+
+# The "account" column is only useful in combined mode (multiple accounts
+# sharing one tab) — when SPLIT_BY_ACCOUNT is on, each tab is already a
+# single account, so the column would just repeat the tab name on every row.
+BASE_COLUMNS = ["id", "date", "description", "amount", "status"]
+TAIL_COLUMNS = ["category", "tags"]
+COLUMNS = BASE_COLUMNS + TAIL_COLUMNS if SPLIT_BY_ACCOUNT else BASE_COLUMNS + ["account"] + TAIL_COLUMNS
 
 REQUIRED_ENV = {"UP_TOKEN": UP_TOKEN, "SHEET_ID": SHEET_ID}
 
@@ -189,7 +195,7 @@ def load_existing_rows(ws):
     return header, index
 
 
-def sync_rows(ws, header, existing_index, rows, tab_name):
+def sync_rows(ws, header, existing_index, rows, tab_name, account_names):
     cat_idx = header.index("category")
     tag_idx = header.index("tags")
 
@@ -197,7 +203,13 @@ def sync_rows(ws, header, existing_index, rows, tab_name):
     updates = []  # (row_number, row_values)
 
     for row in rows:
-        row_values = [str(row[c]) for c in COLUMNS]
+        row_values = []
+        for c in COLUMNS:
+            if c == "account":
+                row_values.append(str(account_names.get(row["account"], row["account"])))
+            else:
+                row_values.append(str(row[c]))
+
         existing = existing_index.get(row["id"])
 
         if existing is None:
@@ -242,6 +254,7 @@ def main():
     in_scope_ids = allowed_account_ids(accounts, ACCOUNT_SCOPE)
     rows = [row for row in rows if row["account"] in in_scope_ids]
     print(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}).")
+    account_names = {acc_id: attrs["displayName"] for acc_id, attrs in accounts.items()}
 
     creds = Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE,
@@ -251,7 +264,6 @@ def main():
     sh = gc.open_by_key(SHEET_ID)
 
     if SPLIT_BY_ACCOUNT:
-        account_names = {acc_id: attrs["displayName"] for acc_id, attrs in accounts.items()}
         grouped = group_rows_by_account(rows)
 
         total_added = total_updated = 0
@@ -259,7 +271,7 @@ def main():
             tab_name = tab_name_for_account(account_id, account_names)
             ws = open_worksheet(sh, tab_name)
             header, existing_index = load_existing_rows(ws)
-            added, updated = sync_rows(ws, header, existing_index, account_rows, tab_name)
+            added, updated = sync_rows(ws, header, existing_index, account_rows, tab_name, account_names)
             print(f"[{tab_name}] new: {added}, updated: {updated}")
             total_added += added
             total_updated += updated
@@ -267,7 +279,7 @@ def main():
     else:
         ws = open_worksheet(sh, SHEET_NAME)
         header, existing_index = load_existing_rows(ws)
-        added, updated = sync_rows(ws, header, existing_index, rows, SHEET_NAME)
+        added, updated = sync_rows(ws, header, existing_index, rows, SHEET_NAME, account_names)
         print(f"Done. New rows: {added}, updated rows: {updated}.")
 
 

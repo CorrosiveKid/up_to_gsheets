@@ -78,14 +78,16 @@ sheet keeps growing without every run getting slower.
   Bump it temporarily (e.g. to `365`) and run once if you need a deeper
   backfill or a wider correction pass.
 - **Multiple accounts** (e.g. Spending + Saver) go into one combined tab
-  by default, distinguished by the `account` column (Up's internal
-  account ID). Set `SPLIT_BY_ACCOUNT=true` in `.env` to instead give each
-  account its own tab, named after that account's display name in Up
-  (e.g. "Spending", "Rainy Day"). `SHEET_NAME` is ignored in this mode.
-  Each account's tab is synced independently, so the upsert/lookback
-  logic works the same way per tab as it does for the single combined
-  sheet. If an account's name contains characters Google Sheets doesn't
-  allow in tab titles, those are stripped automatically.
+  by default, distinguished by an `account` column showing the account's
+  display name (e.g. "Up", "Rainy Day"). Set `SPLIT_BY_ACCOUNT=true` in
+  `.env` to instead give each account its own tab, named the same way.
+  `SHEET_NAME` is ignored in this mode, and the `account` column is
+  dropped entirely — every row on a tab already belongs to one account,
+  so the column would just repeat the tab name. Each account's tab is
+  synced independently, so the upsert/lookback logic works the same way
+  per tab as it does for the single combined sheet. If an account's name
+  contains characters Google Sheets doesn't allow in tab titles, those
+  are stripped automatically.
 - **Which accounts get synced at all** is controlled by `ACCOUNT_SCOPE`:
   - `personal` — only your individually-owned accounts ("Up" and any
     "Up Savers").
