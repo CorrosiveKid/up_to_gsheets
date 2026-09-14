@@ -36,6 +36,7 @@ SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "service_ac
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "90"))
 SPLIT_BY_ACCOUNT = os.environ.get("SPLIT_BY_ACCOUNT", "false").strip().lower() in ("1", "true", "yes")
 ACCOUNT_SCOPE = os.environ.get("ACCOUNT_SCOPE", "all").strip().lower()
+SPENDING_ONLY = os.environ.get("SPENDING_ONLY", "false").strip().lower() in ("1", "true", "yes")
 
 UP_BASE = "https://api.up.com.au/api/v1"
 
@@ -105,16 +106,27 @@ def fetch_accounts():
     return accounts
 
 
-def allowed_account_ids(accounts, scope):
-    """Which account IDs are in scope for 'personal' / 'joint' / 'all'."""
+def allowed_account_ids(accounts, scope, spending_only=False):
+    """Which account IDs are in scope, combining ownership (personal/joint/all)
+    with the optional spending-accounts-only restriction."""
     if scope == "all":
-        return set(accounts.keys())
-    wanted_ownership = SCOPE_TO_OWNERSHIP[scope]
-    return {
-        account_id
-        for account_id, attrs in accounts.items()
-        if attrs["ownershipType"] == wanted_ownership
-    }
+        ids = set(accounts.keys())
+    else:
+        wanted_ownership = SCOPE_TO_OWNERSHIP[scope]
+        ids = {
+            account_id
+            for account_id, attrs in accounts.items()
+            if attrs["ownershipType"] == wanted_ownership
+        }
+
+    if spending_only:
+        ids = {
+            account_id
+            for account_id in ids
+            if accounts[account_id]["accountType"] == "TRANSACTIONAL"
+        }
+
+    return ids
 
 
 def transaction_to_row(tx):
@@ -251,9 +263,9 @@ def main():
     print(f"Fetched {len(rows)} transactions.")
 
     accounts = fetch_accounts()
-    in_scope_ids = allowed_account_ids(accounts, ACCOUNT_SCOPE)
+    in_scope_ids = allowed_account_ids(accounts, ACCOUNT_SCOPE, SPENDING_ONLY)
     rows = [row for row in rows if row["account"] in in_scope_ids]
-    print(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}).")
+    print(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}, SPENDING_ONLY={SPENDING_ONLY}).")
     account_names = {acc_id: attrs["displayName"] for acc_id, attrs in accounts.items()}
 
     creds = Credentials.from_service_account_file(
