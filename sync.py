@@ -37,6 +37,7 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "90"))
 SPLIT_BY_ACCOUNT = os.environ.get("SPLIT_BY_ACCOUNT", "false").strip().lower() in ("1", "true", "yes")
 ACCOUNT_SCOPE = os.environ.get("ACCOUNT_SCOPE", "all").strip().lower()
 SPENDING_ONLY = os.environ.get("SPENDING_ONLY", "false").strip().lower() in ("1", "true", "yes")
+SORT_ORDER = os.environ.get("SORT_ORDER", "asc").strip().lower()
 
 UP_BASE = "https://api.up.com.au/api/v1"
 
@@ -54,6 +55,8 @@ VALID_SCOPES = ("personal", "joint", "all")
 # joint    = "2Up" + "2Up Savers" (jointly-owned accounts)
 SCOPE_TO_OWNERSHIP = {"personal": "INDIVIDUAL", "joint": "JOINT"}
 
+VALID_SORT_ORDERS = ("asc", "desc")
+
 
 def check_config():
     missing = [name for name, val in REQUIRED_ENV.items() if not val]
@@ -63,6 +66,8 @@ def check_config():
         sys.exit(f"Google service account file not found: {SERVICE_ACCOUNT_FILE}")
     if ACCOUNT_SCOPE not in VALID_SCOPES:
         sys.exit(f"ACCOUNT_SCOPE must be one of {VALID_SCOPES}, got {ACCOUNT_SCOPE!r}")
+    if SORT_ORDER not in VALID_SORT_ORDERS:
+        sys.exit(f"SORT_ORDER must be one of {VALID_SORT_ORDERS}, got {SORT_ORDER!r}")
 
 
 # --- Up API ------------------------------------------------------------------
@@ -150,6 +155,11 @@ def transaction_to_row(tx):
         "account": account.get("id", ""),
         "category": category_id,
         "tags": tags,
+        # Full timestamp, kept only for sorting — not a sheet column (not in
+        # COLUMNS), so it never gets written out. Using the full timestamp
+        # rather than the truncated "date" avoids same-day transactions
+        # ending up in an arbitrary order relative to each other.
+        "_created_at": attrs["createdAt"],
     }
 
 
@@ -211,7 +221,7 @@ def sync_rows(ws, header, existing_index, rows, tab_name, account_names):
     cat_idx = header.index("category")
     tag_idx = header.index("tags")
 
-    new_rows = []
+    new_rows = []  # (sort_key, row_values)
     updates = []  # (row_number, row_values)
 
     for row in rows:
@@ -225,7 +235,7 @@ def sync_rows(ws, header, existing_index, rows, tab_name, account_names):
         existing = existing_index.get(row["id"])
 
         if existing is None:
-            new_rows.append(row_values)
+            new_rows.append((row["_created_at"], row_values))
             continue
 
         rownum, old_row = existing
@@ -244,7 +254,19 @@ def sync_rows(ws, header, existing_index, rows, tab_name, account_names):
         ws.spreadsheet.values_batch_update({"valueInputOption": "USER_ENTERED", "data": batch_data})
 
     if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+        # Sort so a multi-transaction batch is internally consistent, not
+        # just correctly placed relative to what's already in the sheet.
+        new_rows.sort(key=lambda item: item[0], reverse=(SORT_ORDER == "desc"))
+        sorted_values = [row_values for _, row_values in new_rows]
+
+        if SORT_ORDER == "desc":
+            # Newest-first sheet: new rows go above existing data, right
+            # after the header row.
+            ws.insert_rows(sorted_values, row=2, value_input_option="USER_ENTERED")
+        else:
+            # Oldest-first sheet (default): new rows go after everything
+            # that's already there.
+            ws.append_rows(sorted_values, value_input_option="USER_ENTERED")
 
     return len(new_rows), len(updates)
 

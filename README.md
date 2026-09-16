@@ -103,5 +103,15 @@ sheet keeps growing without every run getting slower.
   If you have an Up Home loan account, it's neither a spending account
   nor a Saver, so it's excluded whenever `SPENDING_ONLY=true` — only
   `SPENDING_ONLY=false` (the default) will include it.
+- **`SORT_ORDER`** controls whether the sheet reads oldest-to-newest
+  (`asc`, default — new rows appended at the bottom) or newest-to-oldest
+  (`desc` — new rows inserted just below the header, pushing everything
+  else down). This only decides where *new* rows land; it won't
+  retroactively re-sort rows already in the sheet, so pick an order
+  before you've synced much history rather than switching later. Within
+  a single run, transactions are also sorted correctly relative to each
+  other — including same-day ones, using their full timestamp — so a
+  90-day initial backfill lands in one consistent order rather than
+  whatever order Up's API happened to return them in.
 - The script never deletes rows, so it's safe to re-run after errors —
   worst case it does a bit of redundant comparison work, never data loss.
