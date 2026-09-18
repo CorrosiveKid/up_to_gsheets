@@ -10,9 +10,13 @@ Up Bank -> Google Sheets sync.
   (LOOKBACK_DAYS) to keep each run fast regardless of how much history
   is in the sheet.
 
-Run manually with `python sync.py`, or schedule it (cron / Task Scheduler).
+Run manually with `python sync.py`, or schedule it (cron / Task Scheduler /
+Vercel Cron — see api/sync.py and README.md).
 """
 
+import base64
+import binascii
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -33,6 +37,10 @@ UP_TOKEN = os.environ.get("UP_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 SHEET_NAME = os.environ.get("SHEET_NAME", "Transactions")
 SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
+# Alternative to the file above, for environments with no writable/committed
+# filesystem (Vercel et al): the whole service account key as a single env
+# var, either raw JSON or base64-encoded JSON.
+SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "90"))
 SPLIT_BY_ACCOUNT = os.environ.get("SPLIT_BY_ACCOUNT", "false").strip().lower() in ("1", "true", "yes")
 ACCOUNT_SCOPE = os.environ.get("ACCOUNT_SCOPE", "all").strip().lower()
@@ -58,16 +66,72 @@ SCOPE_TO_OWNERSHIP = {"personal": "INDIVIDUAL", "joint": "JOINT"}
 VALID_SORT_ORDERS = ("asc", "desc")
 
 
+class ConfigError(Exception):
+    """Raised when the environment isn't configured well enough to run.
+
+    Raised rather than sys.exit()'d so the same code path works both as a
+    CLI (where main() turns it into an exit status) and inside a serverless
+    handler (where it becomes an HTTP error response).
+    """
+
+
 def check_config():
     missing = [name for name, val in REQUIRED_ENV.items() if not val]
     if missing:
-        sys.exit(f"Missing required environment variable(s): {', '.join(missing)}")
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        sys.exit(f"Google service account file not found: {SERVICE_ACCOUNT_FILE}")
+        raise ConfigError(f"Missing required environment variable(s): {', '.join(missing)}")
+    if not SERVICE_ACCOUNT_JSON and not os.path.exists(SERVICE_ACCOUNT_FILE):
+        raise ConfigError(
+            f"No Google credentials: set GOOGLE_SERVICE_ACCOUNT_JSON, or provide the "
+            f"key file at {SERVICE_ACCOUNT_FILE}"
+        )
     if ACCOUNT_SCOPE not in VALID_SCOPES:
-        sys.exit(f"ACCOUNT_SCOPE must be one of {VALID_SCOPES}, got {ACCOUNT_SCOPE!r}")
+        raise ConfigError(f"ACCOUNT_SCOPE must be one of {VALID_SCOPES}, got {ACCOUNT_SCOPE!r}")
     if SORT_ORDER not in VALID_SORT_ORDERS:
-        sys.exit(f"SORT_ORDER must be one of {VALID_SORT_ORDERS}, got {SORT_ORDER!r}")
+        raise ConfigError(f"SORT_ORDER must be one of {VALID_SORT_ORDERS}, got {SORT_ORDER!r}")
+
+
+def load_credentials():
+    """Service account credentials from the env var if set, else the key file.
+
+    The env var takes precedence so a deployed environment doesn't
+    accidentally pick up a stale key file that happened to get bundled.
+    """
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    if SERVICE_ACCOUNT_JSON:
+        return Credentials.from_service_account_info(
+            _parse_service_account_json(SERVICE_ACCOUNT_JSON), scopes=scopes
+        )
+
+    return Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+
+
+def _parse_service_account_json(raw):
+    """Accept the key as raw JSON or as base64-encoded JSON.
+
+    Base64 is the practical option for dashboards and .env files, where a
+    multi-line JSON blob with embedded "\\n" in the private key is easy to
+    mangle on copy/paste.
+    """
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise ConfigError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is neither valid JSON nor valid base64"
+        ) from exc
+
+    try:
+        return json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON decoded from base64 but isn't valid JSON"
+        ) from exc
 
 
 # --- Up API ------------------------------------------------------------------
@@ -273,29 +337,41 @@ def sync_rows(ws, header, existing_index, rows, tab_name, account_names):
 
 # --- Main ----------------------------------------------------------------
 
-def main():
+def run_sync(log=print):
+    """Do one full sync and return a summary dict.
+
+    Returns rather than prints its result so callers that aren't a terminal
+    (the Vercel cron handler) can turn it into a response body. `log` still
+    gets the human-readable progress lines — on Vercel those land in the
+    function logs.
+    """
     check_config()
 
     since_dt = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     since_iso = since_dt.strftime("%Y-%m-%dT00:00:00+00:00")
 
-    print(f"Fetching Up transactions since {since_iso} ...")
+    log(f"Fetching Up transactions since {since_iso} ...")
     transactions = fetch_transactions(since_iso)
     rows = [transaction_to_row(tx) for tx in transactions]
-    print(f"Fetched {len(rows)} transactions.")
+    log(f"Fetched {len(rows)} transactions.")
+    fetched = len(rows)
 
     accounts = fetch_accounts()
     in_scope_ids = allowed_account_ids(accounts, ACCOUNT_SCOPE, SPENDING_ONLY)
     rows = [row for row in rows if row["account"] in in_scope_ids]
-    print(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}, SPENDING_ONLY={SPENDING_ONLY}).")
+    log(f"{len(rows)} transactions in scope (ACCOUNT_SCOPE={ACCOUNT_SCOPE}, SPENDING_ONLY={SPENDING_ONLY}).")
     account_names = {acc_id: attrs["displayName"] for acc_id, attrs in accounts.items()}
 
-    creds = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    gc = gspread.authorize(creds)
+    gc = gspread.authorize(load_credentials())
     sh = gc.open_by_key(SHEET_ID)
+
+    summary = {
+        "fetched": fetched,
+        "in_scope": len(rows),
+        "since": since_iso,
+        "split_by_account": SPLIT_BY_ACCOUNT,
+        "tabs": {},
+    }
 
     if SPLIT_BY_ACCOUNT:
         grouped = group_rows_by_account(rows)
@@ -306,15 +382,30 @@ def main():
             ws = open_worksheet(sh, tab_name)
             header, existing_index = load_existing_rows(ws)
             added, updated = sync_rows(ws, header, existing_index, account_rows, tab_name, account_names)
-            print(f"[{tab_name}] new: {added}, updated: {updated}")
+            log(f"[{tab_name}] new: {added}, updated: {updated}")
+            summary["tabs"][tab_name] = {"added": added, "updated": updated}
             total_added += added
             total_updated += updated
-        print(f"Done. Total new rows: {total_added}, updated rows: {total_updated}.")
+        log(f"Done. Total new rows: {total_added}, updated rows: {total_updated}.")
+        summary["added"] = total_added
+        summary["updated"] = total_updated
     else:
         ws = open_worksheet(sh, SHEET_NAME)
         header, existing_index = load_existing_rows(ws)
         added, updated = sync_rows(ws, header, existing_index, rows, SHEET_NAME, account_names)
-        print(f"Done. New rows: {added}, updated rows: {updated}.")
+        log(f"Done. New rows: {added}, updated rows: {updated}.")
+        summary["tabs"][SHEET_NAME] = {"added": added, "updated": updated}
+        summary["added"] = added
+        summary["updated"] = updated
+
+    return summary
+
+
+def main():
+    try:
+        run_sync()
+    except ConfigError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":
