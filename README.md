@@ -55,6 +55,89 @@ sheet keeps growing without every run getting slower.
 
 ## 5. Schedule it
 
+### Option A: Vercel (free, runs daily in the cloud)
+
+No machine of yours has to be awake. `api/sync.py` wraps the same sync in a
+serverless function at `/api/sync`, and `vercel.json` has Vercel Cron hit it
+once a day.
+
+1. Push this repo to GitHub, then import it at
+   https://vercel.com/new. There's no framework and no build step — accept
+   the defaults.
+2. Turn your service account key into a single-line value, because Vercel
+   has no filesystem to put `service_account.json` on:
+
+   ```bash
+   base64 -w0 service_account.json    # Linux
+   base64 -i  service_account.json    # macOS
+   ```
+
+3. Generate a secret for the cron endpoint:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+4. In the Vercel project, go to **Settings → Environment Variables** and add
+   (for Production at minimum):
+
+   | Variable | Value |
+   | --- | --- |
+   | `UP_TOKEN` | your Up personal access token |
+   | `SHEET_ID` | the Sheet ID from its URL |
+   | `GOOGLE_SERVICE_ACCOUNT_JSON` | the base64 string from step 2 |
+   | `CRON_SECRET` | the secret from step 3 |
+   | `LOOKBACK_DAYS` | `14` is a good value here — see the note below |
+
+   Any of the other settings (`SHEET_NAME`, `SPLIT_BY_ACCOUNT`,
+   `ACCOUNT_SCOPE`, `SPENDING_ONLY`, `SORT_ORDER`) can be added the same
+   way; they default exactly as they do locally.
+
+5. Redeploy so the new variables take effect (env var changes don't apply to
+   an already-built deployment).
+
+6. Check it works by calling the endpoint yourself:
+
+   ```bash
+   curl -H "Authorization: Bearer $CRON_SECRET" \
+     https://your-project.vercel.app/api/sync
+   ```
+
+   You should get a JSON summary back (`{"ok": true, "added": 12, ...}`) and
+   see the rows land in the sheet. Without the header you get a 401 — that's
+   the endpoint refusing to run for anyone who stumbles onto the URL.
+
+Vercel Cron then calls it on the schedule in `vercel.json`:
+
+```json
+"crons": [{ "path": "/api/sync", "schedule": "0 19 * * *" }]
+```
+
+Cron schedules are **UTC**. `0 19 * * *` is about 5am in Sydney during
+winter (AEST) and 6am during daylight saving (AEDT) — Vercel doesn't adjust
+for DST, so the local time shifts by an hour twice a year. Edit the
+expression and redeploy to move it.
+
+Things to know about the free (Hobby) plan:
+
+- **Once a day, and only roughly on time.** Hobby allows up to 2 cron jobs
+  and they must be daily or less frequent; the invocation can drift by up to
+  an hour from the stated time. Fine for this — the sync is idempotent and
+  catches up on whatever it missed.
+- **Keep `LOOKBACK_DAYS` modest.** A function is capped at 60 seconds. The
+  default 90 means every run re-fetches 90 days of transactions from Up and
+  re-reads the whole sheet to compare, which can run long. On a daily
+  schedule, `14` still gives you a two-week window to catch recategorised
+  transactions, and runs in a few seconds.
+- **The first backfill is best done locally.** Run `python sync.py` once
+  with `LOOKBACK_DAYS=365` on your own machine (no timeout there), then let
+  Vercel take over the daily top-up.
+- **`CRON_SECRET` is required.** The handler returns a 500 rather than
+  running if it isn't set, so a misconfigured deploy can't leave an open
+  endpoint that anyone can use to burn your Up API and Sheets quota.
+
+### Option B: your own machine
+
 **macOS / Linux (cron):** run `crontab -e` and add a line to sync every
 30 minutes:
 

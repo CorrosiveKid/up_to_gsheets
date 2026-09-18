@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/sync",
+      "schedule": "0 19 * * *"
+    }
+  ],
+  "functions": {
+    "api/sync.py": {
+      "maxDuration": 60,
+      "includeFiles": "sync.py"
+    }
+  }
+}
