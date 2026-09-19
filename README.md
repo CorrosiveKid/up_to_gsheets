@@ -300,6 +300,18 @@ without it.
 **401 when you curl the endpoint** — your `Authorization: Bearer …` header is
 missing or doesn't match `CRON_SECRET`.
 
+**`GOOGLE_SERVICE_ACCOUNT_JSON is neither valid JSON nor valid base64`** —
+the value didn't survive the trip into Vercel. Line breaks, stray spaces, a
+BOM and `certutil -encode`'s PEM wrapper are all tolerated, so this usually
+means it was truncated on paste. Re-copy it, or sidestep base64 entirely and
+paste the **raw contents of `service_account.json`** into the variable —
+that works just as well, multi-line and all. The error message names the
+likely cause and the length it received.
+
+**`GOOGLE_SERVICE_ACCOUNT_JSON is missing required field(s)`** — the value
+parsed, but isn't a service account key. Make sure you copied the JSON key
+downloaded from Google Cloud, not the OAuth client secret or another file.
+
 **`No python entrypoint found in default locations`** on the Vercel build —
 `pyproject.toml` is missing or its `[tool.vercel] entrypoint` line was
 changed. Vercel only auto-detects entrypoints named
