@@ -18,6 +18,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -106,32 +107,93 @@ def load_credentials():
     return Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
 
 
+# certutil -encode (the usual Windows stand-in for base64) wraps its output
+# in PEM-style BEGIN/END lines, which aren't part of the payload.
+_PEM_WRAPPER_RE = re.compile(r"^-----(?:BEGIN|END)[^-]*-----$", re.MULTILINE)
+
+# The fields google-auth needs; checking them ourselves turns "wrong JSON
+# file" into a message that says so.
+_SERVICE_ACCOUNT_REQUIRED_KEYS = ("type", "private_key", "client_email")
+
+
 def _parse_service_account_json(raw):
     """Accept the key as raw JSON or as base64-encoded JSON.
 
     Base64 is the practical option for dashboards and .env files, where a
     multi-line JSON blob with embedded "\\n" in the private key is easy to
     mangle on copy/paste.
+
+    Deliberately forgiving about how the base64 arrives. Terminals wrap it,
+    dashboards re-flow it, PowerShell can prepend a BOM and certutil adds a
+    PEM wrapper — none of which change the payload, and all of which used to
+    be rejected outright.
     """
-    raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
+    raw = raw.strip().lstrip("\ufeff").strip()
+    # Normalise CRLF up front so the PEM-wrapper match below isn't defeated
+    # by a stray \r at the end of each line.
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if not raw:
+        raise ConfigError("GOOGLE_SERVICE_ACCOUNT_JSON is set but empty.")
 
     try:
-        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError) as exc:
+        return _validate_service_account(json.loads(raw))
+    except json.JSONDecodeError:
+        pass  # not raw JSON, so try base64 below
+
+    candidate = _PEM_WRAPPER_RE.sub("", raw)
+    candidate = "".join(candidate.split())  # unwrap: drop every whitespace run
+    candidate = candidate.replace("-", "+").replace("_", "/")  # base64url
+    candidate += "=" * (-len(candidate) % 4)  # restore stripped padding
+
+    try:
+        decoded = base64.b64decode(candidate, validate=True).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
         raise ConfigError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is neither valid JSON nor valid base64"
+            "GOOGLE_SERVICE_ACCOUNT_JSON is neither valid JSON nor valid base64 "
+            f"({len(raw)} characters). {_credential_hint(raw)}"
         ) from exc
 
     try:
-        return json.loads(decoded)
+        return _validate_service_account(json.loads(decoded))
     except json.JSONDecodeError as exc:
         raise ConfigError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON decoded from base64 but isn't valid JSON"
+            "GOOGLE_SERVICE_ACCOUNT_JSON decoded from base64 but isn't valid "
+            "JSON. It may have been truncated when it was copied."
         ) from exc
+
+
+def _credential_hint(raw):
+    """A pointer towards the likely cause, without echoing the value itself."""
+    if raw.startswith("{"):
+        return (
+            "It starts with '{', so it looks like raw JSON that didn't parse — "
+            "it was probably truncated when pasted."
+        )
+    if raw.startswith("-----"):
+        return (
+            "It looks like PEM-wrapped output. If you used `certutil -encode`, "
+            "prefer PowerShell's "
+            "[Convert]::ToBase64String([IO.File]::ReadAllBytes(...)), or paste "
+            "the raw JSON instead."
+        )
+    return "Re-copy it from the key file, or paste the raw JSON instead."
+
+
+def _validate_service_account(info):
+    """Catch a valid-JSON-but-wrong-file paste before google-auth does."""
+    if not isinstance(info, dict):
+        raise ConfigError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON parsed, but isn't a JSON object — "
+            "it should be the whole service account key file."
+        )
+    missing = [k for k in _SERVICE_ACCOUNT_REQUIRED_KEYS if not info.get(k)]
+    if missing:
+        raise ConfigError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is missing required field(s): "
+            f"{', '.join(missing)}. Make sure it's the service account key "
+            "JSON downloaded from Google Cloud, not another file."
+        )
+    return info
 
 
 # --- Up API ------------------------------------------------------------------
