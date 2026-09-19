@@ -1,16 +1,71 @@
 # Up Bank → Google Sheets sync
 
-Pulls your Up Bank transactions (including category and tags) into a
-Google Sheet. Safe to run repeatedly — new transactions are appended,
-and if a transaction already in the sheet gets recategorised or retagged
-in Up, this script updates that row in place instead of duplicating it.
+Pulls your [Up Bank](https://up.com.au) transactions — including category and
+tags — into a Google Sheet you own, on a schedule, for free.
 
-## 1. Get an Up personal access token
+It's self-hosted: you run your own copy, and your data only ever moves
+between Up's API, your Google Sheet, and whatever you run the sync on. There's
+no service in the middle, and nobody else gets a copy of your banking data.
+
+Safe to run repeatedly. New transactions are appended, and if something
+already in the sheet gets recategorised or retagged in Up, the existing row is
+updated in place rather than duplicated. It never deletes rows.
+
+> **You'll need an Up Bank account**, which is Australian-only. If you don't
+> bank with Up, this won't be useful to you.
+
+What you end up with:
+
+| id | date | description | amount | status | account | category | tags |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 9b1f… | 2026-09-14 | Coffee Supreme | -5.50 | SETTLED | Up | restaurants-and-cafes | coffee |
+| 3c7a… | 2026-09-14 | Transfer to Rainy Day | -100.00 | SETTLED | Up | | |
+
+`category` and `tags` are Up's own identifiers, so they stay stable and are
+easy to pivot on.
+
+## What you'll need
+
+- An **Up Bank account** and a personal access token (free, 2 minutes).
+- A **Google account**, to hold the sheet and a free service account.
+- Either:
+  - a **Vercel account** + **GitHub account** to run it in the cloud on a
+    daily schedule (free), **or**
+  - **Python 3.12+** on a machine of your own, if you'd rather run it there.
+
+Everything below fits inside the free tier of all three services. See
+[Costs](#costs).
+
+## Step 1 — Get your own copy
+
+This isn't a hosted service — you deploy your own instance.
+
+**[Fork this repository](https://github.com/CorrosiveKid/up_to_gsheets/fork)**
+to your GitHub account. A fork is what lets Vercel redeploy automatically when
+you change the schedule or settings later.
+
+Your fork can be public — no secrets ever get committed. `.env` and
+`service_account.json` are both gitignored, and every credential lives in
+environment variables instead.
+
+If you only intend to run it on your own machine, a plain clone is fine:
+
+```bash
+git clone https://github.com/CorrosiveKid/up_to_gsheets.git
+cd up_to_gsheets
+```
+
+## Step 2 — Get an Up personal access token
 
 1. Go to https://api.up.com.au and log in with your Up account.
 2. Generate a Personal Access Token. Copy it — you won't see it again.
 
-## 2. Set up Google Sheets access (one-time)
+Treat it like a password. If it ever leaks, revoke it on that same page and
+issue a new one.
+
+## Step 3 — Set up Google Sheets access
+
+This is the fiddliest part, and it's a one-time thing.
 
 1. Go to https://console.cloud.google.com and create a project (or use an
    existing one).
@@ -30,42 +85,29 @@ in Up, this script updates that row in place instead of duplicating it.
 7. Copy the Sheet ID out of its URL:
    `https://docs.google.com/spreadsheets/d/THIS_PART/edit`
 
-## 3. Install and configure
+A service account can only touch sheets you explicitly share with it, so it
+has no access to the rest of your Google Drive.
 
-```bash
-cd up-to-sheets
-pip install -r requirements.txt
-cp .env.example .env
-```
+## Step 4 — Run it
 
-Edit `.env` and fill in `UP_TOKEN` and `SHEET_ID`. Leave the rest as
-defaults unless you want a different tab name or lookback window.
+Pick whichever suits you. They're not exclusive — plenty of people do the
+first backfill locally and then let Vercel handle the daily top-up.
 
-## 4. Run it
+### Option A — Vercel (free, daily, nothing of yours stays running)
 
-```bash
-python sync.py
-```
+`api/sync.py` wraps the sync in a serverless function at `/api/sync`, and
+`vercel.json` has Vercel Cron call it once a day.
 
-First run creates the sheet tab with headers and populates it with the
-last `LOOKBACK_DAYS` (default 90) of transactions. Every run after that
-appends anything new and fixes up category/tags on rows that changed —
-transactions older than the lookback window are left untouched, so the
-sheet keeps growing without every run getting slower.
+1. Import your fork at https://vercel.com/new. There's no framework and no
+   build step — accept the defaults.
 
-## 5. Schedule it
+   [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FCorrosiveKid%2Fup_to_gsheets&env=UP_TOKEN,SHEET_ID,GOOGLE_SERVICE_ACCOUNT_JSON,CRON_SECRET,LOOKBACK_DAYS)
 
-### Option A: Vercel (free, runs daily in the cloud)
+   (That button copies the repo into your own GitHub account and deploys it,
+   prompting for the variables below — an alternative to forking by hand.)
 
-No machine of yours has to be awake. `api/sync.py` wraps the same sync in a
-serverless function at `/api/sync`, and `vercel.json` has Vercel Cron hit it
-once a day.
-
-1. Push this repo to GitHub, then import it at
-   https://vercel.com/new. There's no framework and no build step — accept
-   the defaults.
-2. Turn your service account key into a single-line value, because Vercel
-   has no filesystem to put `service_account.json` on:
+2. Turn your service account key into a single-line value, because Vercel has
+   no filesystem to put `service_account.json` on:
 
    ```bash
    base64 -w0 service_account.json    # Linux
@@ -79,7 +121,7 @@ once a day.
    ```
 
 4. In the Vercel project, go to **Settings → Environment Variables** and add
-   (for Production at minimum):
+   these (for Production at minimum):
 
    | Variable | Value |
    | --- | --- |
@@ -87,25 +129,24 @@ once a day.
    | `SHEET_ID` | the Sheet ID from its URL |
    | `GOOGLE_SERVICE_ACCOUNT_JSON` | the base64 string from step 2 |
    | `CRON_SECRET` | the secret from step 3 |
-   | `LOOKBACK_DAYS` | `14` is a good value here — see the note below |
+   | `LOOKBACK_DAYS` | `14` — see the notes below |
 
-   Any of the other settings (`SHEET_NAME`, `SPLIT_BY_ACCOUNT`,
-   `ACCOUNT_SCOPE`, `SPENDING_ONLY`, `SORT_ORDER`) can be added the same
-   way; they default exactly as they do locally.
+   Anything else from the [configuration reference](#configuration) can be
+   added the same way; defaults are identical to local runs.
 
-5. Redeploy so the new variables take effect (env var changes don't apply to
-   an already-built deployment).
+5. **Redeploy.** Environment variable changes don't apply to an
+   already-built deployment.
 
 6. Check it works by calling the endpoint yourself:
 
    ```bash
-   curl -H "Authorization: Bearer $CRON_SECRET" \
+   curl -H "Authorization: Bearer YOUR_CRON_SECRET" \
      https://your-project.vercel.app/api/sync
    ```
 
    You should get a JSON summary back (`{"ok": true, "added": 12, ...}`) and
-   see the rows land in the sheet. Without the header you get a 401 — that's
-   the endpoint refusing to run for anyone who stumbles onto the URL.
+   see rows land in the sheet. Without the header you get a 401 — that's the
+   endpoint refusing anyone who stumbles onto the URL.
 
 Vercel Cron then calls it on the schedule in `vercel.json`:
 
@@ -113,53 +154,83 @@ Vercel Cron then calls it on the schedule in `vercel.json`:
 "crons": [{ "path": "/api/sync", "schedule": "0 19 * * *" }]
 ```
 
-`pyproject.toml` is what makes the build work: Vercel treats this repo as a
-Python project and only auto-detects entrypoints named
-`app`/`index`/`server`/`main`/`wsgi`/`asgi`. Ours is `api/sync.py`, so
-`[tool.vercel] entrypoint = "api.sync:handler"` points at it explicitly —
-without that the build fails with *"No python entrypoint found in default
-locations"*. Vercel also installs dependencies from `pyproject.toml` when
-it's present, which is why that list mirrors `requirements.txt`; keep the two
-in step. Local runs are unaffected and still use `requirements.txt`.
+Cron schedules are **UTC**. `0 19 * * *` is about 5am in Sydney during winter
+(AEST) and 6am during daylight saving (AEDT) — Vercel doesn't adjust for DST,
+so the local time shifts by an hour twice a year. Edit the expression and
+redeploy to move it.
 
-Cron schedules are **UTC**. `0 19 * * *` is about 5am in Sydney during
-winter (AEST) and 6am during daylight saving (AEDT) — Vercel doesn't adjust
-for DST, so the local time shifts by an hour twice a year. Edit the
-expression and redeploy to move it.
+Things to know about Vercel's free (Hobby) plan:
 
-Things to know about the free (Hobby) plan:
-
-- **Once a day, and only roughly on time.** Hobby allows up to 2 cron jobs
-  and they must be daily or less frequent; the invocation can drift by up to
-  an hour from the stated time. Fine for this — the sync is idempotent and
-  catches up on whatever it missed.
+- **Once a day, and only roughly on time.** Hobby allows up to 2 cron jobs and
+  they must be daily or less frequent; the invocation can drift by up to an
+  hour. Fine here — the sync is idempotent and catches up on whatever it
+  missed.
 - **Keep `LOOKBACK_DAYS` modest.** A function is capped at 60 seconds. The
-  default 90 means every run re-fetches 90 days of transactions from Up and
-  re-reads the whole sheet to compare, which can run long. On a daily
-  schedule, `14` still gives you a two-week window to catch recategorised
-  transactions, and runs in a few seconds.
-- **The first backfill is best done locally.** Run `python sync.py` once
-  with `LOOKBACK_DAYS=365` on your own machine (no timeout there), then let
-  Vercel take over the daily top-up.
-- **`CRON_SECRET` is required.** The handler returns a 500 rather than
-  running if it isn't set, so a misconfigured deploy can't leave an open
-  endpoint that anyone can use to burn your Up API and Sheets quota.
+  default 90 makes every run re-fetch 90 days from Up and re-read the whole
+  sheet to compare, which can run long. On a daily schedule `14` still gives
+  you a fortnight to catch recategorised transactions, and finishes in
+  seconds.
+- **Do the first backfill locally.** Run it once with `LOOKBACK_DAYS=365` on
+  your own machine (no timeout there), then let Vercel take over.
+- **`CRON_SECRET` is required.** The handler returns a 500 instead of running
+  if it isn't set, so a half-configured deploy can't leave an open endpoint
+  that anyone could use to burn your Up API and Sheets quota.
 
-### Option B: your own machine
+### Option B — Your own machine
 
-**macOS / Linux (cron):** run `crontab -e` and add a line to sync every
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` and fill in `UP_TOKEN` and `SHEET_ID`. Leave the rest as defaults
+unless you want a different tab name or lookback window. Then:
+
+```bash
+python sync.py
+```
+
+The first run creates the sheet tab with headers and populates it with the
+last `LOOKBACK_DAYS` (default 90) of transactions. Every run after that
+appends anything new and fixes up category/tags on rows that changed —
+transactions older than the lookback window are left untouched, so the sheet
+keeps growing without every run getting slower.
+
+To schedule it:
+
+**macOS / Linux (cron)** — run `crontab -e` and add a line to sync every
 30 minutes:
 
 ```
-*/30 * * * * cd /full/path/to/up-to-sheets && /usr/bin/python3 sync.py >> sync.log 2>&1
+*/30 * * * * cd /full/path/to/up_to_gsheets && /usr/bin/python3 sync.py >> sync.log 2>&1
 ```
 
-**Windows:** use Task Scheduler to run
-`python C:\path\to\up-to-sheets\sync.py` on a repeating trigger, with
+**Windows** — use Task Scheduler to run
+`python C:\path\to\up_to_gsheets\sync.py` on a repeating trigger, with
 "Start in" set to the project folder (so it finds `.env` and
 `service_account.json`).
 
-## Notes / things worth knowing
+## Configuration
+
+Every setting is an environment variable, read from `.env` locally or from
+Vercel's environment variables in the cloud. `.env.example` documents them all
+with comments.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `UP_TOKEN` | *required* | Your Up personal access token. |
+| `SHEET_ID` | *required* | The ID from your Google Sheet's URL. |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | `service_account.json` | Path to the key file. Used locally. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | — | The key as raw JSON or base64, for Vercel. Takes precedence over the file. |
+| `CRON_SECRET` | — | Bearer token protecting `/api/sync`. Required on Vercel. |
+| `SHEET_NAME` | `Transactions` | Tab to sync into. Created if missing. Ignored when `SPLIT_BY_ACCOUNT=true`. |
+| `LOOKBACK_DAYS` | `90` | How far back to fetch and to check for category/tag changes. |
+| `SPLIT_BY_ACCOUNT` | `false` | Give each Up account its own tab instead of one combined tab. |
+| `ACCOUNT_SCOPE` | `all` | `personal`, `joint`, or `all`. |
+| `SPENDING_ONLY` | `false` | Exclude Saver accounts, syncing only transactional ones. |
+| `SORT_ORDER` | `asc` | `asc` (oldest at top) or `desc` (newest at top). |
+
+## How the sync behaves
 
 - **Transfers between your own Up accounts** typically have no category —
   they'll show up in the sheet with a blank `category` cell, which is
@@ -171,8 +242,8 @@ Things to know about the free (Hobby) plan:
   backfill or a wider correction pass.
 - **Multiple accounts** (e.g. Spending + Saver) go into one combined tab
   by default, distinguished by an `account` column showing the account's
-  display name (e.g. "Up", "Rainy Day"). Set `SPLIT_BY_ACCOUNT=true` in
-  `.env` to instead give each account its own tab, named the same way.
+  display name (e.g. "Up", "Rainy Day"). Set `SPLIT_BY_ACCOUNT=true` to
+  instead give each account its own tab, named the same way.
   `SHEET_NAME` is ignored in this mode, and the `account` column is
   dropped entirely — every row on a tab already belongs to one account,
   so the column would just repeat the tab name. Each account's tab is
@@ -187,6 +258,7 @@ Things to know about the free (Hobby) plan:
   - `SPENDING_ONLY` — if `true`, excludes Saver accounts and syncs only
     spending/transactional accounts (e.g. "Up" but not "Rainy Day").
     Defaults to `false` (Savers included).
+
   These stack: `ACCOUNT_SCOPE=personal` + `SPENDING_ONLY=true` syncs
   just your personal "Up" account and nothing else. `ACCOUNT_SCOPE=all`
   + `SPENDING_ONLY=true` syncs both spending accounts ("Up" and "2Up")
@@ -207,3 +279,73 @@ Things to know about the free (Hobby) plan:
   whatever order Up's API happened to return them in.
 - The script never deletes rows, so it's safe to re-run after errors —
   worst case it does a bit of redundant comparison work, never data loss.
+
+## Troubleshooting
+
+**"permission denied" / 403 from Google** — you almost certainly skipped
+sharing the sheet with the service account's `client_email` as an Editor
+(step 3.6). This is the single most common setup mistake.
+
+**401 from Up** — the token is wrong, or was revoked. Generate a new one at
+https://api.up.com.au.
+
+**`Missing required environment variable(s)`** — `UP_TOKEN` or `SHEET_ID`
+isn't set. On Vercel, check you added them to the right environment *and*
+redeployed afterwards.
+
+**500 with `CRON_SECRET is not set`** — add `CRON_SECRET` to your Vercel
+environment variables and redeploy. The endpoint deliberately refuses to run
+without it.
+
+**401 when you curl the endpoint** — your `Authorization: Bearer …` header is
+missing or doesn't match `CRON_SECRET`.
+
+**`No python entrypoint found in default locations`** on the Vercel build —
+`pyproject.toml` is missing or its `[tool.vercel] entrypoint` line was
+changed. Vercel only auto-detects entrypoints named
+`app`/`index`/`server`/`main`/`wsgi`/`asgi`, so this project points at
+`api/sync.py` explicitly.
+
+**The function times out** — lower `LOOKBACK_DAYS`, and do any large backfill
+locally where there's no 60-second cap.
+
+**The cron didn't fire exactly on time** — expected on Hobby; it can drift up
+to an hour, and runs at most once a day.
+
+**A `category` cell is blank** — normal for transfers between your own
+accounts.
+
+## Costs
+
+Free on every service involved, at this usage:
+
+- **Up API** — free, with generous rate limits for personal use.
+- **Google Sheets API** — free; a daily sync is nowhere near the quotas.
+- **Vercel Hobby** — free; this uses 1 of your 2 allowed cron jobs.
+
+## Security notes
+
+- `.env` and `service_account.json` are gitignored. Don't commit either, and
+  don't paste them into issues.
+- Credentials live in environment variables, so a public fork leaks nothing.
+- `CRON_SECRET` gates `/api/sync`, and the handler fails closed (500) if it
+  isn't configured, rather than leaving the endpoint open.
+- The Google service account can only reach sheets you've explicitly shared
+  with it.
+- Revoke an Up token at https://api.up.com.au if you think it's been exposed.
+
+## Contributing
+
+Issues and pull requests are welcome. Two things worth knowing before you
+open one:
+
+- Dependencies are listed in **both** `requirements.txt` (used for local
+  installs) and `pyproject.toml` (what Vercel installs from). Update both.
+- `pyproject.toml` also carries the `[tool.vercel] entrypoint` that makes the
+  Vercel build work — don't drop it.
+
+## License
+
+[Apache 2.0](LICENSE).
+
+Not affiliated with or endorsed by Up Bank.
