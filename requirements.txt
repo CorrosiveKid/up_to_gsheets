@@ -1,3 +1,5 @@
+# Keep in step with the [project] dependencies in pyproject.toml, which is
+# what Vercel installs from.
 requests>=2.31
 gspread>=6.0
 google-auth>=2.29

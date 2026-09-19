@@ -113,6 +113,15 @@ Vercel Cron then calls it on the schedule in `vercel.json`:
 "crons": [{ "path": "/api/sync", "schedule": "0 19 * * *" }]
 ```
 
+`pyproject.toml` is what makes the build work: Vercel treats this repo as a
+Python project and only auto-detects entrypoints named
+`app`/`index`/`server`/`main`/`wsgi`/`asgi`. Ours is `api/sync.py`, so
+`[tool.vercel] entrypoint = "api.sync:handler"` points at it explicitly —
+without that the build fails with *"No python entrypoint found in default
+locations"*. Vercel also installs dependencies from `pyproject.toml` when
+it's present, which is why that list mirrors `requirements.txt`; keep the two
+in step. Local runs are unaffected and still use `requirements.txt`.
+
 Cron schedules are **UTC**. `0 19 * * *` is about 5am in Sydney during
 winter (AEST) and 6am during daylight saving (AEDT) — Vercel doesn't adjust
 for DST, so the local time shifts by an hour twice a year. Edit the

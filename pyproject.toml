@@ -1,0 +1,23 @@
+# Vercel's Python runtime builds this repo as a Python project, so it needs
+# to be told which file and top-level variable to serve. Without the
+# [tool.vercel] entrypoint below, the build fails with "No python entrypoint
+# found in default locations" — Vercel only auto-detects entrypoints named
+# app/index/server/main/wsgi/asgi, and ours is api/sync.py.
+#
+# Dependencies are duplicated from requirements.txt because Vercel installs
+# from this file when it's present, while local setup still uses
+# requirements.txt (see README). Keep the two lists in step.
+
+[project]
+name = "up-to-gsheets"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31",
+    "gspread>=6.0",
+    "google-auth>=2.29",
+    "python-dotenv>=1.0",
+]
+
+[tool.vercel]
+entrypoint = "api.sync:handler"
